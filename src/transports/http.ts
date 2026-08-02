@@ -30,6 +30,14 @@ const httpServer = createNodeServer(async (req, res) => {
     // so it must NOT require the gateway bearer. Security comes from the
     // single-use, user-bound `state`.
     if (url.pathname === '/withings/callback') {
+      // Withings validates the registered URL with a HEAD request and requires a
+      // 2xx reply (developer.withings.com callback-url-requirements). Answer HEAD
+      // (and bare visits) with 200 so registration/validation passes.
+      if (req.method === 'HEAD') {
+        res.writeHead(200, corsHeaders(req));
+        res.end();
+        return;
+      }
       await handleCallback(url, res);
       return;
     }
@@ -80,6 +88,12 @@ async function handleCallback(url: URL, res: import('node:http').ServerResponse)
   const state = url.searchParams.get('state');
   const page = (title: string, msg: string, ok: boolean) =>
     `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>${title}</title><body style="font-family:system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem;text-align:center"><h1>${ok ? '✅' : '⚠️'} ${title}</h1><p>${msg}</p></body>`;
+  // Bare visit / validation probe (no OAuth params) → 200 so reachability checks pass.
+  if (!code && !state) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(page('Withings connector', 'This endpoint completes Withings sign-in. Start from Claude with the withings_connect tool.', true));
+    return;
+  }
   try {
     if (!code || !state) {
       throw new Error('Missing code/state.');
