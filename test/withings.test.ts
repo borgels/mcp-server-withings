@@ -30,8 +30,8 @@ function tokens(id = 'wu1') {
 describe('TokenStore', () => {
   it('encrypts at rest and round-trips per user, keyed case-insensitively', () => {
     const s = store();
-    s.setTokens('ABO@borgels.com', tokens('wu42'));
-    expect(s.getTokens('abo@borgels.com')?.withingsUserId).toBe('wu42');
+    s.setTokens('USER@Example.com', tokens('wu42'));
+    expect(s.getTokens('user@example.com')?.withingsUserId).toBe('wu42');
     // raw file must not contain the plaintext token
     const raw = require('node:fs').readFileSync(join(dir, 'store.json'), 'utf8');
     expect(raw).not.toContain('wu42');
