@@ -57,6 +57,19 @@ export class WithingsClient {
     }
   }
 
+  /**
+   * Link the user opens first: our own confirmation page (/withings/connect), which
+   * shows the identity the link is bound to and only then redirects to Withings.
+   * Served from the same origin as the redirect URI unless WITHINGS_PUBLIC_BASE_URL is set.
+   */
+  enrollmentUrl(state: string): string {
+    this.requireConfigured();
+    const base = trimSlash(process.env.WITHINGS_PUBLIC_BASE_URL || new URL(this.redirectUri).origin);
+    const url = new URL(`${base}/withings/connect`);
+    url.searchParams.set('state', state);
+    return url.toString();
+  }
+
   /** Browser authorization URL for a user to grant consent. */
   authorizeUrl(state: string): string {
     this.requireConfigured();

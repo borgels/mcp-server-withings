@@ -29,7 +29,7 @@ export function registerWithingsTools(
 
   server.registerTool(
     'withings_connect',
-    { title: 'Connect Withings account', description: 'Start linking YOUR Withings account. Returns an authorization URL — open it in your browser, sign into Withings, and approve. After that the data tools work. Needed once (and again only if you disconnect or the link expires).', inputSchema: {}, annotations: { ...WRITE_ANNOTATIONS, readOnlyHint: false } },
+    { title: 'Connect Withings account', description: 'Start linking YOUR Withings account. Returns an authorization URL — open it in your browser, confirm the identity shown, sign into Withings, and approve. After that the data tools work. Needed once (and again only if you disconnect or the link expires).', inputSchema: {}, annotations: { ...WRITE_ANNOTATIONS, readOnlyHint: false } },
     async input =>
       run('withings_connect', options, input, async () => {
         const user = requireUser(options.onBehalfOf);
@@ -37,8 +37,8 @@ export function registerWithingsTools(
         const state = store.createState(user);
         return json({
           alreadyConnected: Boolean(already),
-          authorizationUrl: client.authorizeUrl(state),
-          instructions: 'Open authorizationUrl in your browser, sign into YOUR Withings account and approve. This link is single-use and expires in 10 minutes.',
+          authorizationUrl: client.enrollmentUrl(state),
+          instructions: 'Open authorizationUrl in your browser. Check that it shows YOUR identity, confirm, then sign into YOUR Withings account and approve. This link is single-use and expires in 10 minutes.',
         });
       }),
   );

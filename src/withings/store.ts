@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -23,6 +23,13 @@ export interface UserTokens {
 interface EnrollState {
   user: string;
   createdAt: number;
+  /**
+   * Set when the user explicitly confirmed (in their browser) which gateway identity
+   * the link is bound to. Holds a sha256 of a random nonce that is also stored in a
+   * cookie on that browser, so the OAuth callback is only accepted from the browser
+   * that confirmed.
+   */
+  confirmedNonceHash?: string;
 }
 
 interface Encrypted {
@@ -122,9 +129,49 @@ export class TokenStore {
     return state;
   }
 
+  /** The user a still-valid state is bound to, without consuming it. */
+  peekState(state: string): string | undefined {
+    this.gcStates();
+    const entry = Object.hasOwn(this.states, state) ? this.states[state] : undefined;
+    if (!entry || Date.now() - entry.createdAt > STATE_TTL_MS) {
+      return undefined;
+    }
+    return entry.user;
+  }
+
+  /**
+   * Record the browser's explicit confirmation of the identity the state is bound to.
+   * Returns a random nonce to hand to that browser (as a cookie), or undefined if the
+   * state is invalid/expired.
+   */
+  confirmState(state: string): string | undefined {
+    if (!this.peekState(state)) {
+      return undefined;
+    }
+    const nonce = randomBytes(24).toString('base64url');
+    this.states[state]!.confirmedNonceHash = sha256Hex(nonce);
+    this.persist();
+    return nonce;
+  }
+
+  /**
+   * Single-use consume that also requires the state to have been confirmed by the
+   * browser presenting `nonce`. The state is consumed even when the check fails.
+   */
+  consumeConfirmedState(state: string, nonce: string | undefined): string | undefined {
+    const entry = Object.hasOwn(this.states, state) ? this.states[state] : undefined;
+    const user = this.consumeState(state);
+    if (!user || !entry?.confirmedNonceHash || !nonce) {
+      return undefined;
+    }
+    const expected = Buffer.from(entry.confirmedNonceHash, 'hex');
+    const supplied = Buffer.from(sha256Hex(nonce), 'hex');
+    return expected.length === supplied.length && timingSafeEqual(expected, supplied) ? user : undefined;
+  }
+
   consumeState(state: string): string | undefined {
     this.gcStates();
-    const entry = this.states[state];
+    const entry = Object.hasOwn(this.states, state) ? this.states[state] : undefined;
     if (!entry) {
       return undefined;
     }
@@ -146,4 +193,8 @@ export class TokenStore {
       this.persist();
     }
   }
+}
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
 }
