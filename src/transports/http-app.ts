@@ -3,11 +3,14 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createServer as createMcpServer } from '../server.js';
 import type { WithingsClient } from '../withings/client.js';
 import type { TokenStore } from '../withings/store.js';
-import { trustForwardedUser } from '../withings/policy.js';
 import {
+  assertAllowedHost,
   assertAllowedOrigin,
   assertAuthorized,
+  AuthFailureLimiter,
   corsHeaders,
+  DEFAULT_AUTH_FAILURE_LIMIT,
+  DEFAULT_AUTH_FAILURE_WINDOW_MS,
   escapeHtml,
   type HttpConfig,
   HttpRequestError,
@@ -19,6 +22,8 @@ export interface HttpAppDeps {
   config: HttpConfig;
   store: TokenStore;
   client: WithingsClient;
+  /** Defaults to console.error. */
+  log?: (line: string) => void;
 }
 
 /** Cookie binding the browser that confirmed the enrollment to the OAuth callback. */
@@ -34,15 +39,23 @@ const PAGE_HEADERS = {
   'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
 };
 
-export function createHttpHandler({ config, store, client }: HttpAppDeps): RequestListener {
+export function createHttpHandler({ config, store, client, log: logOption }: HttpAppDeps): RequestListener {
+  const log = logOption ?? ((line: string) => console.error(line));
+  const failureLimit = config.authFailureLimit ?? DEFAULT_AUTH_FAILURE_LIMIT;
+  const limiter = failureLimit > 0
+    ? new AuthFailureLimiter(failureLimit, config.authFailureWindowMs ?? DEFAULT_AUTH_FAILURE_WINDOW_MS)
+    : undefined;
+
   return async (req, res) => {
+    const remote = req.socket.remoteAddress ?? 'unknown';
+    const describeRequest = () => `${req.method ?? '-'} ${(req.url ?? '').split('?')[0]!.slice(0, 200)} from ${remote}`;
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
 
-      // Enrollment interstitial — reached directly by the user's browser (Caddy routes
-      // /withings/* to the container, NOT via the gateway). It shows which gateway
-      // identity the link is bound to and requires an explicit confirmation before
-      // redirecting to Withings.
+      // Enrollment interstitial: reached directly by the user's browser through a
+      // reverse proxy (not by the MCP client), so it does not require the /mcp
+      // bearer. It shows which identity the link is bound to and requires an
+      // explicit confirmation before redirecting to Withings.
       if (url.pathname === '/withings/connect') {
         await handleConnect(req, res, url, store, client);
         return;
@@ -56,7 +69,7 @@ export function createHttpHandler({ config, store, client }: HttpAppDeps): Reque
         // 2xx reply (developer.withings.com callback-url-requirements). Answer HEAD
         // (and bare visits) with 200 so registration/validation passes.
         if (req.method === 'HEAD') {
-          res.writeHead(200, corsHeaders(req));
+          res.writeHead(200, corsHeaders(req, config));
           res.end();
           return;
         }
@@ -64,43 +77,74 @@ export function createHttpHandler({ config, store, client }: HttpAppDeps): Reque
         return;
       }
 
-      if (url.pathname !== '/mcp') {
-        sendJson(res, 404, { error: 'Not found' }, req);
+      if (url.pathname === '/healthz' && (req.method === 'GET' || req.method === 'HEAD')) {
+        sendJson(res, 200, { status: 'ok' });
         return;
       }
 
-      assertAllowedOrigin(req);
+      if (url.pathname !== '/mcp') {
+        throw new HttpRequestError(404, 'Not found');
+      }
+
+      assertAllowedHost(req, config);
+      assertAllowedOrigin(req, config);
       if (req.method === 'OPTIONS') {
-        res.writeHead(204, corsHeaders(req));
+        res.writeHead(204, corsHeaders(req, config));
         res.end();
         return;
       }
       if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'Method not allowed' }, req, { Allow: 'POST' });
-        return;
+        throw new HttpRequestError(405, 'Method not allowed', { headers: { Allow: 'POST, OPTIONS' } });
       }
 
-      assertAuthorized(req, config);
-      const body = await readJsonBody(req, config.maxBodyBytes);
+      try {
+        assertAuthorized(req, config);
+      } catch (error) {
+        // Only failing requests are counted and throttled; a valid token is never blocked.
+        if (limiter) {
+          const retryAfter = limiter.retryAfterSeconds(remote);
+          if (retryAfter > 0) {
+            sendJson(res, 429, { error: 'Too many failed authentication attempts' }, req, {
+              'Retry-After': String(retryAfter),
+            }, config);
+            return;
+          }
+          if (limiter.recordFailure(remote)) {
+            log(`[http] ${remote} reached ${failureLimit} failed authentication attempts; further failures get 429`);
+          }
+        }
+        throw error;
+      }
 
-      const forwardedUser = trustForwardedUser() ? firstHeader(req.headers['x-mcp-user']) : undefined;
+      const body = await readJsonBody(req, config.maxBodyBytes);
+      const forwardedUser = config.trustForwardedUser ? firstHeader(req.headers['x-mcp-user']) : undefined;
 
       const mcpServer = createMcpServer({ client, store, onBehalfOf: forwardedUser });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      await mcpServer.connect(transport);
-      await transport.handleRequest(req, res, body);
       res.on('close', () => {
         void transport.close();
         void mcpServer.close();
       });
+      for (const [name, value] of Object.entries(corsHeaders(req, config))) {
+        res.setHeader(name, value);
+      }
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res, body);
     } catch (error) {
-      console.error(error);
-      if (!res.headersSent) {
-        if (error instanceof HttpRequestError) {
-          sendJson(res, error.status, { error: error.message }, req);
-          return;
+      if (error instanceof HttpRequestError) {
+        log(`[http] ${error.status} ${describeRequest()}: ${error.message}`);
+        if (!res.headersSent && !res.destroyed) {
+          const payload = error.jsonRpcCode === undefined
+            ? { error: error.message }
+            : { jsonrpc: '2.0', error: { code: error.jsonRpcCode, message: error.message }, id: null };
+          sendJson(res, error.status, payload, req, error.headers, config);
         }
-        sendJson(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null }, req);
+        return;
+      }
+
+      log(`[http] 500 ${describeRequest()}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+      if (!res.headersSent && !res.destroyed) {
+        sendJson(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null }, req, {}, config);
       }
     }
   };
