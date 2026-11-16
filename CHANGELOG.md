@@ -1,6 +1,42 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+### Changes
+
+- HTTP: the server refuses to start without `MCP_HTTP_TOKEN` when bound to a
+  non-loopback address or with `MCP_ALLOW_ANY_ORIGIN=true` (in addition to
+  `WITHINGS_TRUST_FORWARDED_USER=true`). `MCP_HTTP_ALLOW_UNAUTHENTICATED=true` is
+  an explicit escape hatch for the first two cases only.
+- HTTP: `MCP_HTTP_TOKEN` must be at least 32 printable ASCII characters.
+- HTTP: failed `/mcp` authentications are limited per client address (429 with
+  `Retry-After`); valid tokens are never throttled. New `MCP_AUTH_FAILURE_LIMIT`
+  (default 20, `0` disables) and `MCP_AUTH_FAILURE_WINDOW_MS` (default 60000).
+- HTTP: `Host` header check on `/mcp` for loopback binds (`MCP_ALLOWED_HOSTS`).
+- HTTP: 401 responses carry `WWW-Authenticate: Bearer`; invalid JSON returns 400
+  (JSON-RPC parse error) instead of 500; oversized bodies are refused from
+  `Content-Length` before reading; one log line per rejected request.
+- HTTP: new `GET /healthz`; graceful shutdown on SIGTERM/SIGINT.
+- `PORT`, `MCP_MAX_BODY_BYTES`, `WITHINGS_TIMEOUT_MS` and the boolean `MCP_*`
+  flags are validated at startup; invalid values stop the server instead of
+  becoming `NaN`.
+- Withings client: redirects are never followed, so `client_secret` (token
+  requests) and access tokens cannot be re-sent to another host.
+- The MCP server reports the package version.
+- Dependency updates (`@modelcontextprotocol/sdk` 1.32.2, `zod` 4.6.7, patched
+  transitive dependencies). CI: pinned actions, image build on pull requests,
+  images published only after tests pass, with SBOM and provenance.
+
+### Upgrade notes
+
+- Deployments binding a non-loopback address must set `MCP_HTTP_TOKEN` (at
+  least 32 characters, e.g. `openssl rand -hex 32`). A shorter token now stops
+  the server.
+- Invalid values for the variables above now stop the server at startup.
+- Unchanged: `/withings/connect` and `/withings/callback` remain reachable
+  without the bearer.
+
+### Also in this release
 
 - Security: refuse to start when `WITHINGS_TRUST_FORWARDED_USER=true` and `MCP_HTTP_TOKEN` is
   unset (and fail closed on `/mcp` in that case); the bearer is compared in constant time.

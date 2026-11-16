@@ -2,10 +2,6 @@ export function writesEnabled(): boolean {
   return process.env.WITHINGS_ENABLE_WRITES === 'true';
 }
 
-export function trustForwardedUser(): boolean {
-  return process.env.WITHINGS_TRUST_FORWARDED_USER === 'true';
-}
-
 export function assertWritesEnabled(action: string): void {
   if (!writesEnabled()) {
     throw new Error(

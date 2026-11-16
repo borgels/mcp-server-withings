@@ -33,6 +33,14 @@ describe('/mcp bearer', () => {
     expect(() => assertSecureStartup({ WITHINGS_TRUST_FORWARDED_USER: 'true', MCP_HTTP_TOKEN: '  ' })).toThrow('MCP_HTTP_TOKEN');
     expect(() => assertSecureStartup({ WITHINGS_TRUST_FORWARDED_USER: 'true', MCP_HTTP_TOKEN: 'tok' })).not.toThrow();
     expect(() => assertSecureStartup({})).not.toThrow();
+    // getHttpConfig applies the same rule, and the escape hatch does not override it.
+    expect(() => getHttpConfig({ WITHINGS_TRUST_FORWARDED_USER: 'true' })).toThrow('MCP_HTTP_TOKEN');
+    expect(() =>
+      getHttpConfig({ WITHINGS_TRUST_FORWARDED_USER: 'true', MCP_HTTP_ALLOW_UNAUTHENTICATED: 'true' }),
+    ).toThrow('WITHINGS_TRUST_FORWARDED_USER');
+    expect(
+      getHttpConfig({ WITHINGS_TRUST_FORWARDED_USER: 'true', MCP_HTTP_TOKEN: 'a'.repeat(64) }).trustForwardedUser,
+    ).toBe(true);
   });
 
   it('compares the bearer exactly', () => {
@@ -49,8 +57,7 @@ describe('/mcp bearer', () => {
   });
 
   it('fails closed when trusting X-MCP-User and no token is configured', () => {
-    process.env.WITHINGS_TRUST_FORWARDED_USER = 'true';
-    const cfg = { ...getHttpConfig(), httpToken: undefined };
+    const cfg = { ...getHttpConfig(), httpToken: undefined, trustForwardedUser: true };
     expect(() => assertAuthorized(req({ 'x-mcp-user': 'victim@example.com' }), cfg)).toThrow('Unauthorized');
   });
 });
@@ -175,5 +182,14 @@ describe('enrollment confirmation', () => {
       body: '{}',
     });
     expect(r.status).toBe(401);
+  });
+});
+
+describe('version', () => {
+  it('reports the package.json version', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { PACKAGE_VERSION } = await import('../src/version.js');
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+    expect(PACKAGE_VERSION).toBe(pkg.version);
   });
 });

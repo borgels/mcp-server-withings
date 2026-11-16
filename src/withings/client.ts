@@ -1,3 +1,4 @@
+import { readEnvInteger } from '../config-env.js';
 import { WithingsHttpError } from '../errors.js';
 import type { TokenStore, UserTokens } from './store.js';
 
@@ -48,7 +49,7 @@ export class WithingsClient {
     );
     this.redirectUri = options.redirectUri ?? process.env.WITHINGS_REDIRECT_URI ?? '';
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.WITHINGS_TIMEOUT_MS ?? 30_000);
+    this.timeoutMs = options.timeoutMs ?? readEnvInteger('WITHINGS_TIMEOUT_MS', 30_000, { min: 1, max: 600_000 });
   }
 
   private requireConfigured(): void {
@@ -58,7 +59,7 @@ export class WithingsClient {
   }
 
   /**
-   * Link the user opens first: our own confirmation page (/withings/connect), which
+   * Link the user opens first: this server's confirmation page (/withings/connect), which
    * shows the identity the link is bound to and only then redirects to Withings.
    * Served from the same origin as the redirect URI unless WITHINGS_PUBLIC_BASE_URL is set.
    */
@@ -95,8 +96,11 @@ export class WithingsClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
+      // Never follow redirects: a 307/308 would re-send client_secret to the target.
+      redirect: 'manual',
       signal: AbortSignal.timeout(this.timeoutMs),
     });
+    assertNotRedirect(res, url);
     const json = (await res.json().catch(() => null)) as { status?: number; body?: TokenResponseBody } | null;
     if (!json || json.status !== 0 || !json.body?.access_token || !json.body.refresh_token) {
       throw new WithingsHttpError({
@@ -167,8 +171,10 @@ export class WithingsClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Authorization: `Bearer ${token}` },
       body: body.toString(),
+      redirect: 'manual',
       signal: AbortSignal.timeout(this.timeoutMs),
     });
+    assertNotRedirect(res, `${url} (${action})`);
     const json = (await res.json().catch(() => null)) as { status?: number; body?: T } | null;
     if (!json || json.status !== 0) {
       throw new WithingsHttpError({
@@ -180,6 +186,18 @@ export class WithingsClient {
       });
     }
     return json.body as T;
+  }
+}
+
+/** Redirects are never followed, so credentials stay on the configured API origin. */
+function assertNotRedirect(res: Response, url: string): void {
+  if (res.status >= 300 && res.status < 400) {
+    void res.body?.cancel().catch(() => undefined);
+    throw new WithingsHttpError({
+      status: res.status,
+      url,
+      fallbackMessage: 'Withings responded with a redirect; redirects are not followed so credentials are never sent elsewhere.',
+    });
   }
 }
 

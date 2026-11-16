@@ -137,3 +137,30 @@ describe('per-user isolation via MCP', () => {
     expect((r.content as Array<{ text: string }>)[0]?.text).toContain('disabled');
   });
 });
+
+describe('WithingsClient hardening', () => {
+  it('never follows redirects, so client_secret and bearer tokens stay on the API origin', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(null, { status: 307, headers: { location: 'https://elsewhere.example/v2/oauth2' } }),
+    );
+    const client = new WithingsClient({
+      clientId: 'c',
+      clientSecret: 'secret-value',
+      redirectUri: 'https://withings.example.com/withings/callback',
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    const error = (await client.exchangeCode('code').catch((e: unknown) => e)) as Error;
+    expect(error.message).toMatch(/redirect/);
+    expect(error.message).not.toContain('secret-value');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.redirect).toBe('manual');
+  });
+
+  it('rejects an invalid WITHINGS_TIMEOUT_MS instead of using NaN', () => {
+    process.env.WITHINGS_TIMEOUT_MS = '30s';
+    expect(() => new WithingsClient()).toThrow(/WITHINGS_TIMEOUT_MS/);
+    process.env.WITHINGS_TIMEOUT_MS = '5000';
+    expect(() => new WithingsClient()).not.toThrow();
+  });
+});

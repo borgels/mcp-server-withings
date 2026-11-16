@@ -1,28 +1,44 @@
-import { createServer as createNodeServer } from 'node:http';
 import { WithingsClient } from '../withings/client.js';
 import { TokenStore } from '../withings/store.js';
-import { createHttpHandler } from './http-app.js';
-import { assertSecureStartup, getHttpConfig } from './http-helpers.js';
+import { configWarnings, getHttpConfig } from './http-helpers.js';
+import { startHttpServer } from './http-server.js';
 
-// Refuse to start if X-MCP-User would be trusted without the gateway bearer on /mcp.
-try {
-  assertSecureStartup();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : error);
+function fail(error: unknown): never {
+  console.error(`Withings MCP HTTP server not started: ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
 }
 
-const config = getHttpConfig();
+async function main(): Promise<void> {
+  let deps;
+  try {
+    // Refuses insecure combinations, including X-MCP-User trust without MCP_HTTP_TOKEN.
+    const config = getHttpConfig();
+    // Shared, long-lived across requests: the encrypted token store and the OAuth
+    // client. Per-request MCP servers bind to the calling user but reuse these.
+    deps = { config, store: new TokenStore(), client: new WithingsClient() };
+  } catch (error) {
+    fail(error);
+  }
 
-// Shared, long-lived across requests: the encrypted token store and the OAuth
-// client. Per-request MCP servers bind to the calling user but reuse these.
-const store = new TokenStore();
-const client = new WithingsClient();
+  for (const warning of configWarnings(deps.config)) {
+    console.error(warning);
+  }
 
-const httpServer = createNodeServer(createHttpHandler({ config, store, client }));
-
-httpServer.listen(config.port, config.host, () => {
+  const running = await startHttpServer(deps);
   console.error(
-    `Withings MCP HTTP server listening on http://${config.host}:${config.port} (/mcp + /withings/connect + /withings/callback)`,
+    `Withings MCP HTTP server listening on http://${deps.config.host}:${running.port} ` +
+      '(/mcp + /withings/connect + /withings/callback)',
   );
+
+  const shutdown = (signal: string) => {
+    console.error(`Received ${signal}, shutting down`);
+    void running.close().then(() => process.exit(0));
+  };
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+}
+
+main().catch(error => {
+  console.error(error);
+  process.exit(1);
 });
